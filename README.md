@@ -12,13 +12,20 @@ vs. general OpenShift behavior.
 The chart is self-contained: it deploys Penpot's own backend, frontend and
 exporter, plus everything they need to run —
 
-- **PostgreSQL** — Penpot's primary datastore.
+- **PostgreSQL** — Penpot's primary datastore. **Has a PVC** (`penpot-postgres`).
 - **Valkey** (Redis-compatible) — required, not optional. Penpot uses it for
   websocket/pub-sub coordination between backend instances and short-lived
-  data, even with a single backend replica.
+  data, even with a single backend replica. **No PVC** — it's an ephemeral
+  cache/pub-sub broker, not a store of record, so there's nothing worth
+  persisting across a restart.
 - **MinIO** (S3-compatible) — object storage for uploaded assets (images,
   exports, etc). Penpot can also use plain filesystem storage
   (`PENPOT_OBJECTS_STORAGE_BACKEND=fs`), but this chart defaults to S3/MinIO.
+  **Has a PVC** (`penpot-minio`).
+
+So exactly **2 of the 6 components have persistent storage**: Postgres
+and MinIO. Backend/frontend/exporter are stateless (all their state
+lives in Postgres/MinIO/Valkey), and Valkey itself is disposable cache.
 
 This chart holds no environment-specific values. Per-environment overrides
 (hostname, storage sizes, resource sizing) live in
