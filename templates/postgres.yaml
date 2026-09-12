@@ -32,13 +32,11 @@ spec:
           image: "{{ .Values.image.postgresImage }}:{{ .Values.image.postgresTag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            - name: POSTGRES_DB
+            - name: POSTGRESQL_DATABASE
               value: penpot
-            - name: POSTGRES_USER
+            - name: POSTGRESQL_USER
               value: penpot
-            - name: PGDATA
-              value: /var/lib/postgresql/data/pgdata
-            - name: POSTGRES_PASSWORD
+            - name: POSTGRESQL_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.existingSecretName }}
@@ -48,7 +46,7 @@ spec:
               name: postgres
           volumeMounts:
             - name: data
-              mountPath: /var/lib/postgresql/data
+              mountPath: /var/lib/pgsql/data
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "penpot", "-d", "penpot"]

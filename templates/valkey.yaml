@@ -15,14 +15,13 @@ spec:
         - name: valkey
           image: "{{ .Values.image.valkeyImage }}:{{ .Values.image.valkeyTag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args:
-            - "valkey-server"
-            - "--maxmemory"
-            - "128mb"
-            - "--maxmemory-policy"
-            - "allkeys-lru"
-            - "--save"
-            - ""
+          # No custom args/command here: unlike the plain upstream
+          # valkey/valkey image, this one has its own startup script that
+          # builds the real valkey-server command line internally --
+          # overriding args would bypass that script. No mandatory env
+          # vars either (no password set here, matching this chart's
+          # previous no-auth internal-only setup); see
+          # release-penpot/README.md.
           ports:
             - containerPort: 6379
               name: valkey

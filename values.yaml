@@ -24,11 +24,16 @@ image:
   penpotTag: "2.17.2"
   pullPolicy: IfNotPresent
 
-  postgresImage: postgres
-  postgresTag: "16-alpine"
+  # Red Hat's certified image, from the OpenShift/Red Hat registry
+  # (needs a Red Hat account's pull secret configured on the cluster --
+  # CRC already has one). Uses POSTGRESQL_* env vars, not POSTGRES_* --
+  # see templates/postgres.yaml.
+  postgresImage: registry.redhat.io/rhel9/postgresql-16
+  postgresTag: "1"
 
-  valkeyImage: valkey/valkey
-  valkeyTag: "8-alpine"
+  # Red Hat's certified image, from the OpenShift/Red Hat registry.
+  valkeyImage: registry.redhat.io/rhel9/valkey-8
+  valkeyTag: "8"
 
   minioImage: quay.io/minio/minio
   minioTag: "RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772"
