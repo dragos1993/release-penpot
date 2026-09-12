@@ -97,18 +97,208 @@ https://hub.docker.com/r/penpotapp/backend/tags for available tags first.
   SCC grants needed. Postgres/Valkey/MinIO's official images create their
   data directories themselves at first run, so they end up owned by
   whatever arbitrary UID OpenShift assigns the pod; they don't require a
-  fixed named UID the way some container images do.
+  fixed named UID the way some container images do. This is true on any
+  OpenShift cluster, CRC or enterprise — not a CRC-specific accommodation.
 - Exposure is via an OpenShift `Route` (`route.openshift.io/v1`), not a
   Kubernetes `Ingress` — set `route.enabled: false` if you front this with
-  something else.
+  something else. Also not CRC-specific.
 
-## Known dev-cluster caveat: BestEffort QoS
+## Configuration reference: CRC value vs. what a properly-sized/enterprise cluster would use
 
-On a memory-constrained node (e.g. a default-sized OpenShift Local / CRC
-VM shared with other operators/apps), see
-`envirenment-penpot/values-dev.yaml` — it clears every component's
-`resources` (both `requests` *and* `limits`; setting only `limits` doesn't
-help, since the API server auto-fills a missing `requests` to match a
-given `limits`) so pods become BestEffort and can still be scheduled. This
-trades away scheduling/eviction guarantees; on a cluster with real
-headroom, drop that override and let this chart's defaults apply.
+This chart was built and tuned against OpenShift **Local (CRC)**, a
+single-node, deliberately small cluster. Below is every place a value
+here reflects that, versus what the *same chart* would typically run
+with on a real multi-node/enterprise OpenShift cluster. See
+[INSTALL.md](INSTALL.md) for the full narrative of how each of these was
+actually discovered (including the two problems that led to them).
+
+### Resource requests/limits — the big one
+
+`values.yaml`'s own defaults, below, are what this chart considers
+"normal" — sized for a real cluster with actual spare capacity, not
+tuned down for anything:
+
+| Component | requests | limits |
+|---|---|---|
+| backend | 200m CPU / 512Mi mem | 1Gi mem |
+| frontend | 100m CPU / 128Mi mem | 256Mi mem |
+| exporter | 200m CPU / 256Mi mem | 512Mi mem |
+| postgres | 100m CPU / 256Mi mem | 512Mi mem |
+| valkey | 50m CPU / 64Mi mem | 128Mi mem |
+| minio | 100m CPU / 256Mi mem | 512Mi mem |
+
+That's ~750m CPU and ~1.4Gi memory requested in total — trivial for any
+real cluster node, but on this project's default-sized CRC VM
+(~10.7Gi allocatable), OpenShift's *own* core components alone
+(`kube-apiserver`, `etcd`, monitoring, OLM, image registry, ingress,
+DNS, ...) were already committing ~96% of that before Penpot entered
+the picture at all (verified on a completely empty, fresh CRC VM — see
+INSTALL.md step 6). There wasn't room left for these requests to be
+admitted.
+
+`envirenment-penpot/values-dev.yaml` is the CRC-specific override: it
+sets every component's `resources` to `{}` (both `requests` *and*
+`limits` cleared — setting only `limits` doesn't help, since the API
+server auto-fills a missing `requests` to match a given `limits`),
+making every Penpot pod **BestEffort QoS**. That's what lets pods
+schedule at all on this VM, at the cost of scheduling/eviction
+guarantees — BestEffort pods are the first evicted under real memory
+pressure and get no CPU-time guarantee, which is exactly what caused
+the JVM backend's startup-time blowups documented in INSTALL.md's probe
+section. **On a properly-sized or enterprise cluster, this override
+should not exist at all** — delete `values-dev.yaml`'s `resources`
+blocks (or don't create an override file in the first place) and let
+this chart's own defaults above apply; they give real Burstable-tier
+QoS.
+
+### Storage class
+
+`postgresql.storageClassName` / `minio.storageClassName` default to
+`""` (empty), meaning "use whatever the cluster's default
+StorageClass is" — this is deliberately cluster-agnostic, not a CRC
+value. What differs is *what that default StorageClass actually is*:
+
+| | CRC | Typical enterprise cluster |
+|---|---|---|
+| Name (example) | `crc-csi-hostpath-provisioner` | e.g. `gp3-csi` (AWS EBS), `ocs-storagecluster-ceph-rbd` (ODF/Ceph), `managed-premium` (Azure Disk) |
+| Backing | A directory on the CRC VM's single local disk | Network-attached block storage |
+| Reclaim policy | `Retain` | Commonly `Delete` |
+| Multi-node reschedule | N/A (one node) | Works — volume follows the pod to another node |
+
+The `Retain` + local-disk combination is why deleting a PVC (or the
+whole namespace) on CRC leaves an orphaned, intact `Released`
+PersistentVolume behind rather than freeing the disk immediately, and
+why a fresh install after that gets a **new, empty** volume instead of
+reusing the old one — see the "does my data survive" walkthrough in
+this project's history. On an enterprise cluster with `Delete` reclaim
+policy, deleting a PVC actually frees the backing storage right away.
+
+### Route TLS
+
+`route.tlsTermination: edge` isn't CRC-specific — `edge` termination is
+a normal, common choice on any OpenShift cluster. What *is*
+environment-specific is where the certificate comes from: CRC's
+`apps-crc.testing` wildcard route uses a self-signed default certificate
+(hence needing `curl -k` / accepting a browser warning in this project's
+docs), whereas an enterprise cluster's default router certificate is
+typically a real one (corporate CA or a public CA via cert-manager),
+so no browser warning and no `-k` needed.
+
+### Images
+
+Pinned versions and the Quay.io MinIO mirror (instead of
+`docker.io/minio/minio`, which stopped publishing free images in
+October 2025) apply everywhere this chart is deployed — not CRC-specific.
+
+### Probe timing
+
+Covered in full in [INSTALL.md](INSTALL.md#probe-configuration-and-why)
+— short version: the values in `templates/*.yaml` themselves are
+general-purpose and not CRC-specific, but this project directly observed
+them being pushed past their tolerance *because of* the BestEffort
+override above (CPU-starved JVM startup taking minutes instead of
+seconds). On a cluster where Penpot's pods get their requested CPU
+share guaranteed (i.e., not BestEffort), the documented timings hold up
+as designed.
+
+## Verifying it's all actually wired up
+
+"All pods `Running`" doesn't by itself prove the backend can reach
+Postgres/Valkey/MinIO — the `tcpSocket` probes explained above can't
+tell you that (see the probe section's "real, observed gap" example).
+Here's how to actually check each connection.
+
+### Pods and storage
+
+```bash
+oc get pods -n penpot
+```
+
+All 6 should be `1/1 Running`: `penpot-backend`, `penpot-frontend`,
+`penpot-exporter`, `penpot-postgres`, `penpot-valkey`, `penpot-minio`.
+
+```bash
+oc get pvc -n penpot
+```
+
+Expect **exactly 2** PersistentVolumeClaims: `penpot-postgres` and
+`penpot-minio`. Valkey has none — it's an ephemeral cache/pub-sub
+broker, not a store of record, so there's nothing there worth
+persisting across a restart (see `templates/valkey.yaml`).
+
+### Backend → Postgres and Valkey (log evidence)
+
+The backend logs an explicit line for each connection it opens at
+startup:
+
+```bash
+oc logs -n penpot deploy/penpot-backend | grep -E "initialize connection pool|initialize redis client|welcome to penpot"
+```
+
+Expect something like:
+
+```
+[...] app.db - hint="initialize connection pool", name="main", uri="postgresql://penpot-postgres:5432/penpot", ...
+[...] app.redis - hint="initialize redis client", uri="redis://penpot-valkey:6379/0"
+[...] app.main - hint="welcome to penpot", flags="...", worker?=true, version="2.17.2"
+```
+
+The `welcome to penpot` line only prints if startup (including running
+Postgres migrations) succeeded end to end — if Postgres or Valkey were
+unreachable, the process would be stuck retrying or crash before
+reaching that line.
+
+A second, functional proof: query Postgres directly for data the app
+created (e.g. after registering a user in the UI):
+
+```bash
+oc exec -n penpot deploy/penpot-postgres -- psql -U penpot -d penpot -c \
+  "SELECT id, email, fullname, is_active, created_at FROM profile;"
+```
+
+Rows showing up here means the whole path (browser → Route → frontend
+→ backend → Postgres) worked.
+
+### Backend/Exporter → Valkey (live connection count)
+
+```bash
+oc exec -n penpot deploy/penpot-valkey -- valkey-cli info clients
+```
+
+`connected_clients` should be ≥ 2 (backend and exporter both hold open
+connections) whenever those pods are up.
+
+### Backend → MinIO (bucket + object evidence)
+
+The bucket-creation Job (`templates/minio.yaml`) already proves initial
+S3 connectivity by creating the bucket — confirm it exists:
+
+```bash
+oc exec -n penpot deploy/penpot-minio -- ls -la /data
+```
+
+Expect a `penpot` directory alongside MinIO's own `.minio.sys`. Unlike
+Postgres/Valkey, the backend doesn't log an explicit "connected to S3"
+line at startup (the S3 client is lazily used per-request, not
+connection-tested at boot), so the practical proof is functional:
+upload an image or set a profile avatar in the Penpot UI, then check
+that new objects appear:
+
+```bash
+oc exec -n penpot deploy/penpot-minio -- find /data/penpot -type f
+```
+
+If backend↔MinIO were broken, that upload would fail in the UI with an
+error rather than silently succeeding.
+
+### Route and end-to-end HTTP
+
+```bash
+oc get route penpot -n penpot
+curl -sk https://penpot.apps-crc.testing/ -o /dev/null -w "HTTP %{http_code}\n"
+curl -sk https://penpot.apps-crc.testing/ | grep -o "<title>[^<]*</title>"
+```
+
+Expect `HTTP 200` and `<title>Penpot | Full-stack design</title>` (or
+similar) — confirms the frontend is serving real content through the
+Route, not just that the pod is up.

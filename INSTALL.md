@@ -26,6 +26,131 @@ env-var reference the chart is built against; see
 and [`argocd-repo`](https://github.com/dragos1993/argocd-repo) for the
 other two pieces.
 
+### Why each piece exists, specifically
+
+**PostgreSQL** is Penpot's system of record for almost everything —
+not just user accounts and team membership, but the design files
+themselves. Penpot stores each file's actual content (pages, shapes,
+components) as JSON inside Postgres rows (`JSONB` columns), so Postgres
+isn't a side concern here, it's where your designs live. The one thing
+that's *not* in Postgres is binary data.
+
+**Valkey** is not "just a cache" in the sense of speeding up repeated
+reads (though it does some of that too). Its critical job is being the
+pub/sub bus the backend uses to broadcast "this file changed" /
+"this user is now editing this shape" events over websockets, for
+real-time multiplayer editing. That plumbing exists inside a *single*
+backend process too (its own internal worker/notification system is
+wired through the same pub/sub layer), which is why Valkey is required
+even with exactly one backend replica — it's not purely a
+multi-replica scaling concern.
+
+**MinIO** is where the binary data that doesn't belong in Postgres
+rows goes: uploaded images/fonts, thumbnails, and the PDF/PNG/SVG files
+the exporter produces. The backend talks to it purely through the S3
+API (`PENPOT_OBJECTS_STORAGE_BACKEND=s3`), so any S3-compatible service
+works — MinIO here, but on a real cluster this could equally be AWS S3,
+a Ceph RGW gateway, etc. Penpot's other supported option is plain
+filesystem storage (`PENPOT_OBJECTS_STORAGE_BACKEND=fs`, writing to a
+PVC) — simpler, but it doesn't let multiple backend replicas share
+files as cleanly, and it locks you out of pointing at real object
+storage later without re-architecting. This chart defaults to S3/MinIO
+because that's the shape you'd actually want in production, even for a
+dev/test install.
+
+**The exporter** is a separate service because rendering an export
+isn't something the backend (a JVM/Clojure process) can do on its own
+— when you click "Export" on a frame, something needs to actually
+*render* it pixel-for-pixel like a browser would. The exporter is a
+Node.js service that does exactly that with a headless Chromium
+instance (Playwright): it loads the file by opening the **frontend's**
+own UI in a hidden browser tab (hence `PENPOT_INTERNAL_URI:
+http://penpot-frontend:8080` — not the backend) and screenshots/prints
+it. Without the exporter, editing still works fully; only the Export
+button fails.
+
+**The frontend** is nginx serving the built single-page app and
+reverse-proxying API/websocket calls to the backend, so the browser
+only ever talks to one hostname (`PENPOT_PUBLIC_URI`).
+
+## Probe configuration, and why
+
+Every component's `readinessProbe`/`livenessProbe` in
+`templates/*.yaml` falls into one of three cases:
+
+**1. Data stores with a real, documented health check** — Postgres
+(`pg_isready`), Valkey (`valkey-cli ping`), MinIO
+(`GET /minio/health/{ready,live}`). These are authoritative and
+low-latency, so they're used directly with fairly tight timing
+(`initialDelaySeconds: 5`/readiness, `15`/liveness; `periodSeconds:
+10`/readiness, `20`/liveness) — there's no reason to wait longer, these
+processes either come up fast or something is genuinely wrong.
+
+**2. Penpot's backend and exporter — no documented health endpoint.**
+Penpot doesn't expose one for either service
+([penpot/penpot#4465](https://github.com/penpot/penpot/issues/4465)),
+so these use `tcpSocket` on their main port (6060 / 6061) — the weakest
+check available: it only proves the process is listening, not that it
+can actually reach Postgres/Valkey/MinIO. **This is a real, observed
+gap**, not just a theoretical one: during a pod-restart test on this
+install, a `backend` pod stayed "Ready" (`1/1`, TCP port up) for over
+30 minutes while its Postgres connection pool was silently retrying
+"Connection refused" in the background after the postgres pod itself
+had briefly restarted. Kubernetes had no way to see that, because
+`tcpSocket` only checks the backend's own port, not its downstream
+dependencies. A production-hardening improvement here (not done in this
+chart) would be an exec probe that hits an internal admin/debug
+endpoint if Penpot ever adds one, or a sidecar-based dependency check.
+
+Timing for these two (`initialDelaySeconds: 15`/readiness,
+`30`/liveness; `periodSeconds: 10`/readiness, `20`/liveness;
+`failureThreshold: 6` on readiness, vs. Kubernetes' own default of 3):
+- The 15s/30s initial delays are based on this JVM/Node backend's
+  observed real startup time on a properly-resourced node — around
+  8-10 seconds from process exec to fully serving, including running
+  Postgres migrations and connecting to Valkey/MinIO. Readiness starts
+  checking at roughly 1.5-2x that; liveness waits twice as long again
+  before it even starts counting failures, so a pod that's merely
+  still migrating is never at risk of being killed mid-migration.
+- Readiness is checked twice as often as liveness (10s vs. 20s)
+  because a readiness failure is cheap and reversible — the pod just
+  drops out of the Service's endpoint list, no disruption — so it's
+  worth finding out quickly when a pod becomes healthy again. A
+  liveness failure causes an actual restart, which is disruptive
+  (drops in-flight requests and websocket connections), so it's
+  deliberately slower to pull that trigger: with the default
+  `failureThreshold: 3`, liveness needs 3 × 20s = 60 continuous
+  seconds of failure before restarting.
+- `failureThreshold: 6` on readiness (double the Kubernetes default of
+  3) exists specifically because these two services are heavier to
+  start than the data-store checks above, and the *default* threshold
+  would flap a perfectly healthy-but-still-starting pod in and out of
+  the Service's endpoints during normal startup — each flap potentially
+  drops an in-flight websocket connection. 6 × 10s = up to 60 more
+  seconds of tolerance after the 15s initial delay (75s total) before a
+  slow-starting pod is marked NotReady.
+
+**3. The frontend** uses `httpGet: /` — nginx will always return real
+content there (HTTP 200), so this is the one component that gets an
+actual, meaningful content check rather than a proxy for "is a process
+running."
+
+**A caveat this install actually hit**: all of the timing above assumes
+the process gets a normal amount of CPU to start up. Under the
+BestEffort scheduling forced by `envirenment-penpot/values-dev.yaml`
+(see step 3 below) — no CPU *request* at all — a JVM process competing
+for CPU with everything else on a busy node can take **far** longer
+than the ~10s baseline to finish starting. During this install's
+pod-restart test, a `backend` pod needed to be killed once by its own
+liveness probe (didn't finish starting inside the ~90s liveness
+tolerance) and its replacement still wasn't listening on its port after
+5+ minutes on the second attempt. That's not a bug in the probe values
+— it's the direct, demonstrated cost of BestEffort QoS: without a CPU
+*request*, the scheduler makes no guarantee about how much CPU time the
+process actually gets, so probe timings tuned for a properly-resourced
+JVM don't hold up. On a cluster with real CPU requests configured (see
+`release-penpot/values.yaml`'s defaults), this wouldn't happen.
+
 ## CRC vs. enterprise OpenShift — what's specific to this cluster
 
 Since this was installed against OpenShift **Local** (CRC), not an
@@ -54,6 +179,24 @@ would apply anywhere on OpenShift (including a real cluster):
   a direct symptom of the tight default memory margin, resolved by the
   memory increase in step 6 — after that, a full reinstall came up
   clean with zero pod restarts and no API server instability.
+- CRC's default storage class, `crc-csi-hostpath-provisioner`, backs
+  every PVC with a directory on the CRC VM's own single disk (there's
+  only one node), and its reclaim policy is `Retain`. That combination
+  matters for how "deleting and recreating" behaves: deleting a PVC (or
+  the whole `penpot` namespace) does **not** wipe the underlying data
+  immediately — the PersistentVolume is left behind in a `Released`
+  state, orphaned but intact, quietly consuming disk space, and a fresh
+  install provisions a **new, empty** volume rather than reusing it (see
+  the "does my data survive" discussion — a namespace delete does not
+  preserve data, precisely because of this "new PVC → new PV" behavior,
+  even though the old PV's bytes technically still exist on disk until
+  someone manually cleans it up). An enterprise cluster's storage class
+  (e.g. AWS EBS gp3, ODF/Ceph RBD, Azure Disk) more commonly defaults to
+  `Delete` reclaim policy instead — there, deleting a PVC actually frees
+  the backing storage right away, and volumes are typically
+  network-attached rather than tied to one node's local disk (so a pod
+  can be rescheduled to a different node and still mount its data,
+  which plain hostpath storage can't do at all).
 
 **Not CRC-specific — general OpenShift behavior (applies to any
 cluster, enterprise included):**
@@ -160,7 +303,7 @@ Two ways to fix that: grow the CRC VM's memory (stop/reconfigure/restart
 the cluster), or shrink Penpot's own requests to fit. Chose the second
 (no cluster restart, nothing else disrupted). That override lives in
 `envirenment-penpot/values-dev.yaml` — see it and this repo's
-[README](README.md)'s "Known dev-cluster caveat" section for the
+[README](README.md)'s "Configuration reference" section for the
 mechanics (short version: a `limits` without a matching `requests` gets
 `requests` auto-filled to match by the API server, so you have to clear
 *both* to actually get BestEffort scheduling).
