@@ -3,6 +3,12 @@
 Helm chart that deploys [Penpot](https://penpot.app) (open-source design &
 prototyping platform) on OpenShift, for development/test use.
 
+See [INSTALL.md](INSTALL.md) for the full step-by-step walkthrough of how
+this was actually installed on OpenShift Local (CRC) — including the real
+problems hit along the way (a memory-constrained node, a MinIO arbitrary-UID
+bug, and two ArgoCD/Helm interaction bugs) and which fixes are CRC-specific
+vs. general OpenShift behavior.
+
 The chart is self-contained: it deploys Penpot's own backend, frontend and
 exporter, plus everything they need to run —
 
