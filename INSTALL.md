@@ -241,6 +241,15 @@ oc get route argocd-server -n argocd
 # https://argocd-server-argocd.apps-crc.testing
 ```
 
+If that comes back empty: a freshly-created `ArgoCD` custom resource
+doesn't get an OpenShift Route by default with the community operator
+(`spec.server.route.enabled` defaults to `false`) — hit this again
+after recreating the cluster from scratch. Fix once per `ArgoCD` CR:
+
+```bash
+oc patch argocd argocd -n argocd --type=merge -p '{"spec":{"server":{"route":{"enabled":true}}}}'
+```
+
 Open that URL in a browser (this machine already resolves
 `*.apps-crc.testing` to `127.0.0.1` via `/etc/hosts`, kept in sync by a
 CRC helper). Login is `admin` with the password from:
