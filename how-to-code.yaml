@@ -1,0 +1,605 @@
+# =============================================================================
+# HOW TO READ THIS CHART'S CODE — _helpers.tpl and backend.yaml, line by line
+# =============================================================================
+#
+# This file is pure documentation (comments only) — Helm/Kubernetes never
+# reads it, it's not part of the chart. It exists so you can understand
+# templates/_helpers.tpl and templates/backend.yaml without needing to know
+# Go (the programming language Helm's templating is built on).
+#
+# -----------------------------------------------------------------------------
+# THE BIG PICTURE FIRST
+# -----------------------------------------------------------------------------
+#
+# A plain Kubernetes YAML file is static: what you write is exactly what gets
+# sent to the cluster. Helm's files (anything under templates/) are NOT
+# static — they are YAML *with placeholders* written in Go's templating
+# language. Before anything is sent to Kubernetes, Helm reads your
+# values.yaml (plus any -f override file), plugs those values into the
+# placeholders, and only THEN do you get plain, ordinary Kubernetes YAML.
+#
+#   templates/backend.yaml (has placeholders)
+#        +
+#   values.yaml / values-dev.yaml (your actual settings)
+#        =  (Helm does this substitution step, called "rendering")
+#   a normal Deployment/Service YAML file, sent to `oc`/`kubectl`
+#
+# You can watch this happen yourself, without touching the cluster:
+#   helm template . -f ../envirenment-penpot/values-dev.yaml
+# That command prints exactly what would be sent to Kubernetes.
+#
+# -----------------------------------------------------------------------------
+# THE FEW SYMBOLS YOU NEED TO RECOGNIZE (no Go knowledge assumed)
+# -----------------------------------------------------------------------------
+#
+# {{ ... }}
+#   Anything between double curly braces is a *template instruction*, not
+#   literal text. Helm evaluates whatever's inside and replaces the whole
+#   {{ ... }} with the result. Everything OUTSIDE {{ }} is just plain text,
+#   copied through unchanged (that's why "apiVersion: apps/v1" below has no
+#   braces — it's already final, nothing to compute).
+#
+# {{- ... -}}   (a hyphen right after {{ or right before }})
+#   Purely about whitespace/newlines, nothing logical. YAML cares a lot about
+#   indentation and blank lines, and template instructions would otherwise
+#   leave stray blank lines behind where they used to be. A "-" tells Helm
+#   "also eat the whitespace/newline touching this side of the braces" so the
+#   final YAML doesn't end up with extra blank lines or misaligned indents.
+#   You can ignore the hyphens when trying to understand *what* a line does —
+#   they only affect *formatting* of the output.
+#
+# . (a single dot, called "the current context")
+#   Think of "." as a variable name meaning "the data I currently have
+#   available to look things up in". At the top of any template, "." is one
+#   big bundle of information Helm hands you for free, containing things
+#   like:
+#     .Values     -> everything from values.yaml (+ your -f overrides)
+#     .Release    -> info about this specific install (its name, etc.)
+#     .Chart      -> info from Chart.yaml (chart name, version)
+#   So .Values.backend.replicas means "go into Values, then backend, then
+#   replicas" — exactly like walking through nested folders, or nested keys
+#   in a YAML/JSON file.
+#
+# $ (a dollar sign)
+#   Also means "the current context", but it's a *fixed* reference to
+#   whatever "." was at the very top of the file. This matters because
+#   inside some Helm constructs "." temporarily changes meaning (it doesn't
+#   happen in these two files, but you'll see "$" used defensively anyway) —
+#   "$" is the safe way to say "no really, I mean the original top-level
+#   data, whatever else '.' currently points at."
+#
+# | (a pipe, exactly like a Unix shell pipe)
+#   Means "take what's on the left, and feed it as input to the function on
+#   the right." Read left to right, like an assembly line.
+#   Example: {{ .Values.flags | quote }}
+#     step 1: look up .Values.flags (some plain text)
+#     step 2: feed it into "quote" (a function that wraps text in "quotes")
+#
+# A "function" here just means a named operation Helm provides, like quote,
+# nindent, toYaml, printf, replace, include, dict — described below as they
+# come up. None of these require knowing Go; they're closer to spreadsheet
+# functions (like =UPPER(A1)) than to real programming.
+#
+# =============================================================================
+# PART 1 — templates/_helpers.tpl, explained line by line
+# =============================================================================
+#
+# This file defines reusable *named snippets* of YAML text — think of them
+# as templates-within-the-template, so the same handful of label lines don't
+# have to be retyped in every single component file (postgres.yaml,
+# backend.yaml, frontend.yaml, ...). Nothing in this file runs by itself;
+# other files "call" these snippets by name.
+#
+# ---
+# Line 1:  {{- define "penpot.name" -}}
+#   "define" starts a named snippet. From here until the matching "end",
+#   we're writing the *body* of something we're choosing to call
+#   "penpot.name" — just a label/name we made up, in quotes so Helm knows
+#   where the name starts and stops. Nothing is output yet; we're only
+#   storing this recipe under that name for later use.
+#
+# Line 2:  penpot
+#   This is the ENTIRE body of the "penpot.name" snippet: the plain text
+#   "penpot". So anywhere this snippet gets called, it produces exactly the
+#   word "penpot" — nothing more. (It looks like overkill for one word, but
+#   it means if this chart is ever renamed, there's exactly one place to
+#   change it.)
+#
+# Line 3:  {{- end -}}
+#   Closes the "define" block started on line 1. Every "define" must have a
+#   matching "end".
+#
+# ---
+# Line 5:  {{- define "penpot.labels" -}}
+#   Starts a new named snippet called "penpot.labels" — the set of standard
+#   Kubernetes labels every resource in this chart should carry.
+#
+# Line 6:  app.kubernetes.io/name: {{ include "penpot.name" . }}
+#   "app.kubernetes.io/name:" is plain YAML text, copied through as-is.
+#   {{ include "penpot.name" . }} means "go run the 'penpot.name' snippet we
+#   just defined above, and paste its output right here." The "." being
+#   passed in is "give it access to the same top-level data I have" — this
+#   particular snippet (line 2, just the word "penpot") doesn't actually use
+#   any data, but "include" always requires you to hand it *some* context,
+#   even if unused.
+#   Net effect once rendered: "app.kubernetes.io/name: penpot"
+#
+# Line 7:  app.kubernetes.io/instance: {{ .Release.Name }}
+#   .Release.Name is the name you gave THIS installation when you ran
+#   `helm install <name> ...` (or the name ArgoCD assigned). This label lets
+#   you tell apart two different installs of the same chart on one cluster
+#   (e.g. "penpot" for this project vs. "penpot-staging" for another).
+#
+# Line 8:  app.kubernetes.io/managed-by: {{ .Release.Service }}
+#   .Release.Service is a built-in value Helm always sets to the literal
+#   text "Helm" — this label just documents "Helm is what manages this
+#   resource" (as opposed to being hand-written or managed by some other
+#   tool).
+#
+# Line 9:  helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
+#   Reading left to right:
+#     printf "%s-%s" .Chart.Name .Chart.Version
+#       "printf" builds a text string from a pattern. "%s-%s" means "insert
+#       one piece of text, then a dash, then another piece of text" — like
+#       filling in two blanks. The two things poured into those blanks are
+#       .Chart.Name (from Chart.yaml, e.g. "penpot") and .Chart.Version
+#       (e.g. "0.1.0"). Result so far: "penpot-0.1.0"
+#     | replace "+" "_"
+#       Take that result and run "replace" on it: swap every "+" character
+#       for an underscore "_". This matters because Helm chart versions are
+#       allowed to contain a "+" (e.g. "0.1.0+build.5"), but a "+" isn't a
+#       valid character in a Kubernetes label value — so this defensively
+#       sanitizes it. For this chart's actual version ("0.1.0", no "+"),
+#       this replace does nothing visible; it's just a safety net.
+#   Net effect once rendered: "helm.sh/chart: penpot-0.1.0"
+#
+# Line 10: {{- end -}}
+#   Closes the "penpot.labels" snippet from line 5.
+#
+# ---
+# Line 12: {{/* Usage: {{ include "penpot.componentLabels" (dict "root" $ "component" "backend") }} */}}
+#   {{/* ... */}} is a COMMENT inside the template language itself (different
+#   from the # comments in this file) — it produces no output at all, it's
+#   purely a note-to-self for whoever reads this .tpl file, showing an
+#   example of how the next snippet gets called elsewhere.
+#
+# Line 13: {{- define "penpot.componentLabels" -}}
+#   Starts a snippet called "penpot.componentLabels". Unlike "penpot.labels"
+#   above (which never looks at its input), this one NEEDS two pieces of
+#   information passed in: which "root" data to use, and which "component"
+#   name (e.g. "backend", "postgres") this is for. But a template snippet
+#   can only be handed ONE input value — so how do you pass two things in
+#   at once? That's what "dict" (seen in backend.yaml, explained in Part 2)
+#   is for: it bundles multiple named values into one single package. Here,
+#   ".root" and ".component" are just the names this snippet expects to find
+#   inside that one package.
+#
+# Line 14: {{ include "penpot.labels" .root }}
+#   Calls the "penpot.labels" snippet from line 5, handing it ".root" — i.e.
+#   "whichever data the caller labeled 'root' inside the package it gave
+#   us." This re-uses all 3 lines (name/instance/managed-by) from
+#   "penpot.labels" without retyping them.
+#
+# Line 15: app.kubernetes.io/component: {{ .component }}
+#   Reads ".component" out of the same input package, and prints it as a
+#   fourth label — this is what actually distinguishes the Deployment
+#   labeled "component: backend" from the one labeled "component: postgres",
+#   etc. Combined with line 14, "penpot.componentLabels" always produces 4
+#   label lines: name, instance, managed-by, component.
+#
+# Line 16: {{- end -}}
+#   Closes "penpot.componentLabels".
+#
+# ---
+# Line 18: {{- define "penpot.selectorLabels" -}}
+#   Starts a fourth snippet, "penpot.selectorLabels" — deliberately a
+#   SMALLER set of labels than "penpot.componentLabels" above (3 labels
+#   instead of 4, and no "managed-by"). Kubernetes Deployments use a
+#   "selector" to say "these are the pods I own" by matching labels, and
+#   that selector must stay identical for the entire lifetime of the
+#   Deployment (Kubernetes refuses to let you change it later — this
+#   actually caused a real bug during this project's ArgoCD setup, see
+#   INSTALL.md). Keeping the selector's label set minimal and separate from
+#   the full label set (which is fine to add more labels to over time)
+#   avoids ever accidentally changing something the selector depends on.
+#
+# Line 19: app.kubernetes.io/name: {{ include "penpot.name" .root }}
+#   Same idea as line 6, but reading ".root" out of the input package
+#   instead of using "." directly — because, again, this snippet expects to
+#   be called with a "dict" package containing "root" and "component".
+#
+# Line 20: app.kubernetes.io/instance: {{ .root.Release.Name }}
+#   Same as line 7 (the install's name), but reached by walking through
+#   ".root" first: ".root" is the package's "root" entry, and ".Release.Name"
+#   is then read from inside THAT.
+#
+# Line 21: app.kubernetes.io/component: {{ .component }}
+#   Same as line 15 — which component this is (backend, postgres, ...).
+#
+# Line 22: {{- end -}}
+#   Closes "penpot.selectorLabels".
+#
+# =============================================================================
+# PART 2 — templates/backend.yaml, explained line by line
+# =============================================================================
+#
+# This file describes 2 real Kubernetes resources, separated by a line of
+# three dashes (---): a Deployment (lines 1-73) and a Service (lines 75-86).
+# A Deployment says "keep N copies of this container running"; a Service
+# gives those pods a stable network address other pods can talk to.
+#
+# --- THE DEPLOYMENT ---
+#
+# Line 1:  apiVersion: apps/v1
+#   Plain Kubernetes YAML, no template code. Tells Kubernetes which version
+#   of its API defines what a "Deployment" looks like.
+#
+# Line 2:  kind: Deployment
+#   Says what KIND of resource this is: a Deployment (as opposed to a
+#   Service, a Secret, a Job, etc — all "kinds" Kubernetes understands).
+#
+# Line 3:  metadata:
+#   The start of a block describing this Deployment's identity (name,
+#   labels) — as opposed to "spec:" below, which describes its desired
+#   behavior.
+#
+# Line 4:    name: penpot-backend
+#   The Deployment's name. Fixed/hardcoded on purpose (not templated) — this
+#   chart always names things "penpot-<component>", so other files can refer
+#   to "penpot-backend" by that exact name (see the Service's selector,
+#   and how other components reach the backend, e.g. frontend.yaml's
+#   PENPOT_BACKEND_URI: "http://penpot-backend:6060").
+#
+# Line 5:    labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "backend") | nindent 4 }}
+#   Reading right to left through the pipe:
+#     dict "root" $ "component" "backend"
+#       Builds that "package with two named things" mentioned in Part 1:
+#       a key called "root" holding "$" (remember: "$" = the original
+#       top-level data — .Values, .Release, .Chart, all of it), and a key
+#       called "component" holding the plain text "backend".
+#     include "penpot.componentLabels" ( ...that package... )
+#       Runs the "penpot.componentLabels" snippet from _helpers.tpl,
+#       handing it that package. Produces 4 lines of text: the "name",
+#       "instance", "managed-by", and "component: backend" labels.
+#     | nindent 4
+#       "nindent" = "put a newline, then indent every line of what came
+#       before by this many spaces." Necessary because YAML meaning depends
+#       entirely on indentation — the 4 label lines need to line up exactly
+#       4 spaces in from the left to sit correctly *under* "labels:". The
+#       "n" in "nindent" is what adds that leading newline (a plain "indent"
+#       without the "n" would leave the first label glued onto the same line
+#       as "labels:", which would be invalid YAML here).
+#
+# Line 6:  spec:
+#   Start of the Deployment's "desired state" — what it should look like and
+#   do, as opposed to "metadata:" above (identity).
+#
+# Line 7:    replicas: {{ .Values.backend.replicas }}
+#   How many copies of the backend pod to run. Not hardcoded — read from
+#   values.yaml's backend.replicas (currently 1). Changing that one value
+#   in values.yaml (or an override file) changes this without touching this
+#   template at all — that's the entire point of templating: separating
+#   "what can change per install" (values.yaml) from "the shape of the
+#   resource" (this file).
+#
+# Line 8:    selector:
+#   Start of the block telling the Deployment which pods belong to it.
+#
+# Line 9:      matchLabels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "backend") | nindent 6 }}
+#   Same pattern as line 5, but calling "penpot.selectorLabels" (the
+#   SMALLER, 3-label snippet) instead of "penpot.componentLabels" — for the
+#   immutability reason explained in Part 1. Indented 6 spaces this time
+#   (one level deeper than line 5's 4, because "matchLabels:" itself is
+#   nested one level deeper than "labels:" was).
+#
+# Line 10:   template:
+#   Start of the "pod template" — a full description of the pod the
+#   Deployment should stamp out N times (N = "replicas" from line 7).
+#   Everything from here to line 73 describes ONE pod.
+#
+# Line 11:     metadata:
+#   Identity info for each pod this Deployment creates (as opposed to the
+#   Deployment's OWN metadata back on line 3).
+#
+# Line 12:       labels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "backend") | nindent 8 }}
+#   The actual labels stamped onto each pod. These MUST match what line 9's
+#   "matchLabels" is looking for (same snippet, same inputs) — otherwise the
+#   Deployment would create pods it doesn't recognize as its own, which
+#   Kubernetes actually refuses outright (it validates this matches at
+#   creation time).
+#
+# Line 13:     spec:
+#   The pod's own desired state: which containers it runs, etc.
+#
+# Line 14:       containers:
+#   Start of the list of containers inside this pod (this pod only has one).
+#
+# Line 15:         - name: backend
+#   The "-" means "this is one item in a list" (YAML list syntax) — the
+#   first (only) container, named "backend".
+#
+# Line 16:           image: "{{ .Values.image.penpotRegistry }}/backend:{{ .Values.image.penpotTag }}"
+#   Two placeholders inside one plain string. Reads image.penpotRegistry
+#   (e.g. "docker.io/penpotapp") and image.penpotTag (e.g. "2.17.2") from
+#   values.yaml and glues them together with "/backend:" in between, giving
+#   something like "docker.io/penpotapp/backend:2.17.2" — the exact
+#   container image to pull and run.
+#
+# Line 17:           imagePullPolicy: {{ .Values.image.pullPolicy }}
+#   Whether to always re-download the image or reuse an already-downloaded
+#   copy — read from values.yaml (default: "IfNotPresent", meaning "reuse it
+#   if it's already on this node").
+#
+# Line 18:           env:
+#   Start of the list of environment variables handed to the container when
+#   it starts — this is how Penpot's backend process is actually configured
+#   (which database to use, feature flags, etc.), rather than via a config
+#   file.
+#
+# Lines 19-20:
+#     - name: PENPOT_FLAGS
+#       value: {{ .Values.flags | quote }}
+#   One environment variable entry: name "PENPOT_FLAGS", value taken from
+#   values.yaml's "flags" setting, piped through "quote" (wraps it in
+#   double-quotes) — needed because this value is a sentence with spaces in
+#   it (e.g. "enable-registration enable-login-with-password ..."), and YAML
+#   requires such values to be quoted to be read as one single piece of
+#   text rather than being misread as YAML structure.
+#
+# Lines 21-22:
+#     - name: PENPOT_PUBLIC_URI
+#       value: "https://{{ .Values.publicHost }}"
+#   Builds the full public URL Penpot advertises to users, by gluing
+#   "https://" onto whatever hostname is set in values.yaml's "publicHost"
+#   (e.g. "penpot.apps-crc.testing").
+#
+# Lines 23-27:
+#     - name: PENPOT_SECRET_KEY
+#       valueFrom:
+#         secretKeyRef:
+#           name: {{ .Values.existingSecretName }}
+#           key: penpot-secret-key
+#   A DIFFERENT shape of environment variable — instead of "value:" (a
+#   literal string typed right here), this uses "valueFrom" +
+#   "secretKeyRef" (both plain Kubernetes concepts, nothing Helm-specific)
+#   to say "don't put the actual value in this YAML file at all — instead,
+#   at container-start time, go fetch it from a Kubernetes Secret object."
+#   "name:" (templated, from values.yaml's existingSecretName, default
+#   "penpot-secrets") is WHICH Secret to read from; "key: penpot-secret-key"
+#   is WHICH entry inside that Secret to use. This is exactly how this
+#   project avoids ever writing real passwords into a chart or git repo —
+#   the Secret is created separately, out-of-band, with `oc create secret`.
+#
+# Lines 28-29:
+#     - name: PENPOT_DATABASE_URI
+#       value: "postgresql://penpot-postgres:5432/penpot"
+#   Where to find the database. "penpot-postgres" here is NOT templated —
+#   it's the exact, hardcoded Service name defined in templates/postgres.yaml
+#   (matching that file's "name: penpot-postgres" the same way this file's
+#   line 4 does for the backend). Kubernetes Services give you built-in DNS
+#   names inside the cluster, so any pod can reach Postgres just by using
+#   its Service name as if it were a hostname — no IP addresses involved.
+#   "5432" is Postgres's standard port; "/penpot" at the end is the database
+#   name to connect to inside that Postgres server.
+#
+# Lines 30-31:
+#     - name: PENPOT_DATABASE_USERNAME
+#       value: penpot
+#   The database username. Not secret (it's not a password), so it's typed
+#   directly here rather than pulled from the Secret.
+#
+# Lines 32-36:
+#     - name: PENPOT_DATABASE_PASSWORD
+#       valueFrom:
+#         secretKeyRef:
+#           name: {{ .Values.existingSecretName }}
+#           key: postgres-password
+#   Same secretKeyRef pattern as lines 23-27, this time fetching the
+#   Postgres password from the "postgres-password" entry in the same
+#   Secret.
+#
+# Lines 37-38:
+#     - name: PENPOT_REDIS_URI
+#       value: "redis://penpot-valkey:6379/0"
+#   Where to find Valkey (the Redis-compatible service) — same idea as the
+#   database URI: "penpot-valkey" is that Service's hardcoded name (from
+#   templates/valkey.yaml), 6379 is Redis/Valkey's standard port, and "/0"
+#   selects Redis "database number 0" (Redis supports multiple numbered
+#   databases inside one server; Penpot just uses the default one).
+#
+# Lines 39-40:
+#     - name: PENPOT_OBJECTS_STORAGE_BACKEND
+#       value: "s3"
+#   Tells Penpot's backend to store uploaded files/exports using the S3
+#   (object storage) protocol, rather than writing them to a local folder.
+#
+# Lines 41-42:
+#     - name: PENPOT_OBJECTS_STORAGE_S3_ENDPOINT
+#       value: "http://penpot-minio:9000"
+#   Which S3-compatible server to talk to — MinIO's Service name (from
+#   templates/minio.yaml) and its API port, 9000. Setting a custom endpoint
+#   here (instead of leaving this unset, which would default to real AWS)
+#   is also what makes Penpot use "path-style" addressing, which MinIO
+#   needs (see release-penpot/README.md).
+#
+# Lines 43-44:
+#     - name: PENPOT_OBJECTS_STORAGE_S3_BUCKET
+#       value: {{ .Values.minio.bucket | quote }}
+#   Which "bucket" (S3's term for a top-level folder) to store files in,
+#   read from values.yaml's minio.bucket setting (default: "penpot") and
+#   quoted for the same reason as PENPOT_FLAGS above (defensive; a bucket
+#   name typically wouldn't need quoting, but it's not guaranteed not to
+#   contain YAML-special characters someone might configure).
+#
+# Lines 45-46:
+#     - name: PENPOT_OBJECTS_STORAGE_S3_REGION
+#       value: "us-east-1"
+#   S3 requires a "region" name even though MinIO (unlike real AWS) doesn't
+#   actually have regions — this is just a value AWS's client libraries
+#   expect to be told something, and "us-east-1" is a conventional
+#   placeholder for that reason.
+#
+# Lines 47-51:
+#     - name: AWS_ACCESS_KEY_ID
+#       valueFrom:
+#         secretKeyRef:
+#           name: {{ .Values.existingSecretName }}
+#           key: minio-root-user
+#   The S3 client code Penpot uses expects credentials under these specific
+#   AWS-branded environment variable names (AWS_ACCESS_KEY_ID /
+#   AWS_SECRET_ACCESS_KEY below) even though the actual server is MinIO, not
+#   real AWS — that's simply the standard names that S3-compatible client
+#   libraries look for. Value comes from the same shared Secret, the
+#   "minio-root-user" entry.
+#
+# Lines 52-56:
+#     - name: AWS_SECRET_ACCESS_KEY
+#       valueFrom:
+#         secretKeyRef:
+#           name: {{ .Values.existingSecretName }}
+#           key: minio-root-password
+#   Same idea, for the MinIO root password (used as the "secret access
+#   key").
+#
+# Line 57:           ports:
+#   Start of the list of network ports this container listens on.
+#
+# Lines 58-59:
+#             - containerPort: 6060
+#               name: http
+#   Declares that the backend process listens on port 6060, and gives that
+#   port the friendly name "http" (used elsewhere, e.g. the Service below
+#   refers to "targetPort: 6060" directly, but other files can also refer
+#   to a port by its name instead of its number).
+#
+# Lines 60-61:
+#           # The backend doesn't expose a documented HTTP health endpoint
+#           # (see penpot/penpot#4465), so probe the socket instead of a path.
+#   A plain YAML comment (# — not the template kind) explaining, for future
+#   readers of THIS specific file, why the next two probes are built the
+#   way they are. Comments like this are never sent to Kubernetes at all —
+#   Helm strips them out during rendering.
+#
+# Line 62:           readinessProbe:
+#   Start of the "is this pod ready to receive traffic right now?" check.
+#   Kubernetes only sends traffic (via the Service) to pods currently
+#   passing their readiness probe — a pod can be "running" but still
+#   excluded from traffic if this fails.
+#
+# Lines 63-64:
+#             tcpSocket:
+#               port: 6060
+#   The actual check performed: "can I open a plain TCP connection to port
+#   6060?" This is the weakest kind of check available (it doesn't verify
+#   the app is actually working correctly, only that *something* is
+#   listening) — used here because Penpot's backend has no documented HTTP
+#   endpoint designed for health checks. See
+#   release-penpot/README.md / INSTALL.md for the full reasoning and a real
+#   gap this causes.
+#
+# Line 65:             initialDelaySeconds: 15
+#   Wait 15 seconds after the container starts before even attempting the
+#   first check — giving it time to boot (connect to the database, run
+#   migrations, etc.) before judging it.
+#
+# Line 66:             periodSeconds: 10
+#   After that initial wait, check again every 10 seconds, indefinitely.
+#
+# Line 67:             failureThreshold: 6
+#   How many checks in a row are allowed to fail before Kubernetes marks
+#   this pod "not ready" (removing it from the Service's traffic rotation).
+#   Kubernetes' own built-in default is 3; this chart raises it to 6
+#   specifically for this slower-starting process (see INSTALL.md for the
+#   full reasoning, including a real incident this was tuned around).
+#
+# Line 68:           livenessProbe:
+#   A SECOND, separate check — "is this pod broken and needs a hard
+#   restart?" (as opposed to readiness, which only affects whether it
+#   receives traffic). Failing liveness causes Kubernetes to kill and
+#   restart the container — a real, disruptive action — so it's normally
+#   configured to be slower/more forgiving than readiness.
+#
+# Lines 69-72:
+#             tcpSocket:
+#               port: 6060
+#             initialDelaySeconds: 30
+#             periodSeconds: 20
+#   Same kind of check as readiness (can I connect to port 6060?), but with
+#   a longer initial wait (30s vs. readiness's 15s) and a longer gap between
+#   checks (20s vs. 10s) — deliberately more relaxed, because the
+#   consequence of a liveness failure (a real restart) is more disruptive
+#   than a readiness failure (just being temporarily skipped for traffic).
+#   No failureThreshold override here, so Kubernetes' own default of 3
+#   applies: 3 failed checks x 20 seconds apart = a full minute of
+#   continuous failure before this pod actually gets restarted.
+#
+# Line 73:           resources: {{ toYaml .Values.backend.resources | nindent 12 }}
+#   "toYaml" takes a chunk of structured data from values.yaml (backend's
+#   "resources" section — which might contain "requests" and "limits" with
+#   CPU/memory numbers, or might be empty {} — see envirenment-penpot's
+#   values-dev.yaml) and converts it into properly formatted YAML text.
+#   This is different from the earlier {{ .Values.xxx }} lines, which just
+#   printed one single plain value (a string or number) — "resources" in
+#   values.yaml is a whole nested structure, so it needs "toYaml" to turn
+#   that structure into valid YAML syntax, before "nindent 12" (same idea as
+#   before) indents the result to line up correctly under "resources:".
+#
+# Line 74:  ---
+#   Three dashes on their own line is plain YAML syntax (nothing to do with
+#   Helm) meaning "a new, separate document starts here." One file can
+#   contain multiple Kubernetes resources this way — everything below this
+#   line is a second, independent resource (the Service), unrelated in
+#   Kubernetes' eyes to the Deployment above, just stored in the same file
+#   for convenience.
+#
+# --- THE SERVICE ---
+#
+# Line 75: apiVersion: v1
+#   Services are defined in Kubernetes' original "v1" API group (a
+#   different one than Deployments' "apps/v1" on line 1 — different kinds
+#   of resources can live in different API groups; you don't need to
+#   memorize which is which, just recognize this line identifies it).
+#
+# Line 76: kind: Service
+#   This resource is a Service — a stable network name/address that routes
+#   traffic to whichever pods currently match its selector (below).
+#
+# Line 77: metadata:
+# Line 78:   name: penpot-backend
+#   Same hardcoded name as the Deployment (line 4) — that's intentional and
+#   is exactly the name other files use to reach the backend over the
+#   network (e.g. "http://penpot-backend:6060" in exporter.yaml/frontend.yaml).
+#   A Deployment and a Service are allowed to share the same name; they're
+#   different "kinds" of resource, so there's no conflict.
+#
+# Line 79:   labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "backend") | nindent 4 }}
+#   Identical pattern to line 5 — just descriptive labels on the Service
+#   itself, not used for routing (that's what "selector" below is for).
+#
+# Line 80: spec:
+#   The Service's desired behavior.
+#
+# Line 81:   selector: {{ include "penpot.selectorLabels" (dict "root" $ "component" "backend") | nindent 4 }}
+#   THIS is what actually does the routing: "send traffic to any pod
+#   carrying these exact labels." Uses the same "penpot.selectorLabels"
+#   snippet (and the same inputs) as the Deployment's pod template (line
+#   12) — so this Service automatically finds exactly the pods that
+#   Deployment creates, because they're labeled identically. If these two
+#   ever used different label snippets or inputs, the Service would find
+#   zero pods and traffic would go nowhere.
+#
+# Line 82:   ports:
+#   Start of the list of ports this Service exposes.
+#
+# Lines 83-85:
+#     - port: 6060
+#       targetPort: 6060
+#       name: http
+#   "port: 6060" is the port OTHER pods use when talking to this Service
+#   (e.g. "http://penpot-backend:6060"); "targetPort: 6060" is the port ON
+#   THE POD traffic actually gets forwarded to (matching containerPort on
+#   line 58) — they happen to be the same number here, but don't have to be
+#   in general (a Service could expose port 80 while forwarding to a
+#   container's port 8080, for example). "name: http" labels this port
+#   entry, matching the container port's name back on line 59, purely for
+#   readability/reference elsewhere.
