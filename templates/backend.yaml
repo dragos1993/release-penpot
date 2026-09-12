@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: penpot-backend
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "backend") | nindent 4 }}
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "backend") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "backend") | nindent 8 }}
+    spec:
+      containers:
+        - name: backend
+          image: "{{ .Values.image.penpotRegistry }}/backend:{{ .Values.image.penpotTag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: PENPOT_FLAGS
+              value: {{ .Values.flags | quote }}
+            - name: PENPOT_PUBLIC_URI
+              value: "https://{{ .Values.publicHost }}"
+            - name: PENPOT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecretName }}
+                  key: penpot-secret-key
+            - name: PENPOT_DATABASE_URI
+              value: "postgresql://penpot-postgres:5432/penpot"
+            - name: PENPOT_DATABASE_USERNAME
+              value: penpot
+            - name: PENPOT_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecretName }}
+                  key: postgres-password
+            - name: PENPOT_REDIS_URI
+              value: "redis://penpot-valkey:6379/0"
+            - name: PENPOT_OBJECTS_STORAGE_BACKEND
+              value: "s3"
+            - name: PENPOT_OBJECTS_STORAGE_S3_ENDPOINT
+              value: "http://penpot-minio:9000"
+            - name: PENPOT_OBJECTS_STORAGE_S3_BUCKET
+              value: {{ .Values.minio.bucket | quote }}
+            - name: PENPOT_OBJECTS_STORAGE_S3_REGION
+              value: "us-east-1"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecretName }}
+                  key: minio-root-user
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecretName }}
+                  key: minio-root-password
+          ports:
+            - containerPort: 6060
+              name: http
+          # The backend doesn't expose a documented HTTP health endpoint
+          # (see penpot/penpot#4465), so probe the socket instead of a path.
+          readinessProbe:
+            tcpSocket:
+              port: 6060
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 6060
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources: {{ toYaml .Values.backend.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: penpot-backend
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "backend") | nindent 4 }}
+spec:
+  selector: {{ include "penpot.selectorLabels" (dict "root" $ "component" "backend") | nindent 4 }}
+  ports:
+    - port: 6060
+      targetPort: 6060
+      name: http

@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: penpot-minio
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "minio") | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.minio.storageClassName }}
+  storageClassName: {{ .Values.minio.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.minio.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: penpot-minio
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "minio") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "minio") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "minio") | nindent 8 }}
+    spec:
+      containers:
+        - name: minio
+          image: "{{ .Values.image.minioImage }}:{{ .Values.image.minioTag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "server"
+            - "/data"
+            - "--console-address"
+            - ":9090"
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecretName }}
+                  key: minio-root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecretName }}
+                  key: minio-root-password
+          ports:
+            - containerPort: 9000
+              name: api
+            - containerPort: 9090
+              name: console
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources: {{ toYaml .Values.minio.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: penpot-minio
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: penpot-minio
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "minio") | nindent 4 }}
+spec:
+  selector: {{ include "penpot.selectorLabels" (dict "root" $ "component" "minio") | nindent 4 }}
+  ports:
+    - port: 9000
+      targetPort: 9000
+      name: api
+    - port: 9090
+      targetPort: 9090
+      name: console
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: penpot-minio-create-bucket
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "minio-create-bucket") | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "minio-create-bucket") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: mc
+          image: "{{ .Values.image.minioMcImage }}:{{ .Values.image.minioMcTag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # Under OpenShift's arbitrary-UID SCC, the container's UID has
+            # no /etc/passwd entry, so HOME defaults to "/" -- and `mc`
+            # needs to write its config under $HOME/.mc. Point it at a
+            # writable path instead.
+            - name: HOME
+              value: /tmp
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecretName }}
+                  key: minio-root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecretName }}
+                  key: minio-root-password
+          command:
+            - "/bin/sh"
+            - "-c"
+            - |
+              set -e
+              until mc alias set penpot http://penpot-minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+                echo "waiting for minio..."; sleep 3
+              done
+              mc mb --ignore-existing penpot/{{ .Values.minio.bucket }}

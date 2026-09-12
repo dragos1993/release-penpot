@@ -1,0 +1,9 @@
+apiVersion: v2
+name: penpot
+description: >
+  Helm chart to deploy Penpot (open-source design & prototyping platform) on
+  OpenShift, including PostgreSQL, Valkey (Redis-compatible cache/pubsub) and
+  MinIO (S3-compatible asset storage) for development/test use.
+type: application
+version: 0.1.0
+appVersion: "2.17.2"

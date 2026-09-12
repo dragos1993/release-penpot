@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: penpot-postgres
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "postgres") | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.postgresql.storageClassName }}
+  storageClassName: {{ .Values.postgresql.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.postgresql.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: penpot-postgres
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "postgres") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "postgres") | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ .Values.image.postgresImage }}:{{ .Values.image.postgresTag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: POSTGRES_DB
+              value: penpot
+            - name: POSTGRES_USER
+              value: penpot
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecretName }}
+                  key: postgres-password
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "penpot", "-d", "penpot"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "penpot", "-d", "penpot"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources: {{ toYaml .Values.postgresql.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: penpot-postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: penpot-postgres
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "postgres") | nindent 4 }}
+spec:
+  selector: {{ include "penpot.selectorLabels" (dict "root" $ "component" "postgres") | nindent 4 }}
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres

@@ -1,0 +1,19 @@
+{{- if .Values.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: penpot
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "frontend") | nindent 4 }}
+spec:
+  host: {{ .Values.publicHost }}
+  to:
+    kind: Service
+    name: penpot-frontend
+  port:
+    targetPort: http
+  {{- if .Values.route.tlsTermination }}
+  tls:
+    termination: {{ .Values.route.tlsTermination }}
+    insecureEdgeTerminationPolicy: Redirect
+  {{- end }}
+{{- end }}

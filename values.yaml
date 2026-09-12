@@ -1,0 +1,98 @@
+# Default values for the penpot chart.
+# Environment-specific overrides live in the envirenment-penpot repo
+# (e.g. values-dev.yaml) and are layered on top of these via ArgoCD's
+# multiple-sources / valueFiles feature, or with `helm install -f`.
+
+# Public hostname the OpenShift Route will be created for, and that
+# Penpot will advertise to clients (login links, websocket origin, etc).
+publicHost: "penpot.apps-crc.testing"
+
+route:
+  enabled: true
+  # edge | reencrypt | passthrough | "" (disable TLS)
+  tlsTermination: edge
+
+# Name of a pre-existing Secret (created out-of-band, NOT via this chart
+# or git) holding: postgres-password, minio-root-user, minio-root-password,
+# penpot-secret-key. See release-penpot/README.md for the create-secret
+# command. Keeping real credentials out of the chart/values repos avoids
+# committing plaintext secrets to git.
+existingSecretName: "penpot-secrets"
+
+image:
+  penpotRegistry: docker.io/penpotapp
+  penpotTag: "2.17.2"
+  pullPolicy: IfNotPresent
+
+  postgresImage: postgres
+  postgresTag: "16-alpine"
+
+  valkeyImage: valkey/valkey
+  valkeyTag: "8-alpine"
+
+  minioImage: quay.io/minio/minio
+  minioTag: "RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772"
+  minioMcImage: quay.io/minio/mc
+  minioMcTag: "RELEASE.2025-08-13T08-35-41Z-cpuv1"
+
+# Space-separated Penpot feature flags. Defaults are tuned for a
+# dev/test install with no SMTP server: registration and password login
+# stay on, email verification is skipped, and invitation/verification
+# emails are logged to the backend pod's stdout instead of being sent.
+flags: "enable-registration enable-login-with-password disable-email-verification enable-log-emails enable-log-invitation-tokens enable-demo-warning"
+
+backend:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+
+frontend:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+exporter:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+postgresql:
+  storage: 5Gi
+  storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+valkey:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+minio:
+  bucket: penpot
+  storage: 10Gi
+  storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi

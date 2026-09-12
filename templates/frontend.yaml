@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: penpot-frontend
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "frontend") | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{ include "penpot.selectorLabels" (dict "root" $ "component" "frontend") | nindent 8 }}
+    spec:
+      containers:
+        - name: frontend
+          image: "{{ .Values.image.penpotRegistry }}/frontend:{{ .Values.image.penpotTag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: PENPOT_FLAGS
+              value: {{ .Values.flags | quote }}
+            - name: PENPOT_PUBLIC_URI
+              value: "https://{{ .Values.publicHost }}"
+            - name: PENPOT_BACKEND_URI
+              value: "http://penpot-backend:6060"
+            - name: PENPOT_EXPORTER_URI
+              value: "http://penpot-exporter:6061"
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources: {{ toYaml .Values.frontend.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: penpot-frontend
+  labels: {{ include "penpot.componentLabels" (dict "root" $ "component" "frontend") | nindent 4 }}
+spec:
+  selector: {{ include "penpot.selectorLabels" (dict "root" $ "component" "frontend") | nindent 4 }}
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
