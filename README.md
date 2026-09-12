@@ -71,7 +71,7 @@ Or via ArgoCD — see `argocd-repo/README.md`.
 
 | Component | Kind | Notes |
 |---|---|---|
-| `penpot-postgres` | Deployment + PVC | Single replica, `Recreate` strategy. `PGDATA` set to a subdirectory of the mount to dodge the classic `lost+found`-on-fresh-PVC init failure. |
+| `penpot-postgres` | Deployment + PVC | Single replica, `Recreate` strategy. Uses Red Hat's certified image (`registry.redhat.io/rhel9/postgresql-16`), which manages its own data subdirectory internally (no `PGDATA` override needed here, unlike the plain upstream `postgres` image). |
 | `penpot-valkey` | Deployment | No persistence — it's a cache/pubsub broker, not a store of record. |
 | `penpot-minio` | Deployment + PVC + post-install/upgrade Job | The Job runs `mc mb --ignore-existing` to create the assets bucket, since Penpot's S3 client does not create it automatically. |
 | `penpot-backend` | Deployment | Talks to Postgres, Valkey and MinIO (via S3 API). |
@@ -88,15 +88,34 @@ nginx always answers.
 
 Pinned, verified-pullable tags as of writing:
 
-- `docker.io/penpotapp/{backend,frontend,exporter}:2.17.2`
-- `postgres:16-alpine`, `valkey/valkey:8-alpine`
+- `docker.io/penpotapp/{backend,frontend,exporter}:2.17.2` — Penpot is a
+  third-party app; it has no equivalent anywhere in the OpenShift/Red Hat
+  registry, only on Docker Hub.
+- `registry.redhat.io/rhel9/postgresql-16:1` and
+  `registry.redhat.io/rhel9/valkey-8:8` — Red Hat's certified images,
+  pulled from the OpenShift/Red Hat registry rather than the plain
+  upstream `postgres`/`valkey` Docker Hub images. Needs a Red Hat
+  account's pull secret configured on the cluster (CRC already has one
+  by default). **These use a different configuration interface than the
+  upstream images** — see `templates/postgres.yaml`/`valkey.yaml`
+  (`POSTGRESQL_USER`/`PASSWORD`/`DATABASE` env vars instead of
+  `POSTGRES_*`, data at `/var/lib/pgsql/data` instead of
+  `/var/lib/postgresql/data`) and INSTALL.md for a real incident this
+  difference caused when switching.
 - `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772` and
   `quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1` — **not**
   `docker.io/minio/minio`: MinIO stopped publishing free images to Docker
   Hub in October 2025, so this chart uses their Quay.io mirror instead.
+  MinIO has no equivalent in the OpenShift/Red Hat registry either — Red
+  Hat doesn't ship MinIO as a certified product.
 
 Bump `image.penpotTag` to track new Penpot releases; check
 https://hub.docker.com/r/penpotapp/backend/tags for available tags first.
+For Postgres/Valkey version bumps, check available tags with (needs the
+cluster's Red Hat pull secret):
+```bash
+podman search --authfile=<path-to-pull-secret.json> --list-tags registry.redhat.io/rhel9/postgresql-16
+```
 
 ## OpenShift-specific notes
 
@@ -196,6 +215,12 @@ so no browser warning and no `-k` needed.
 Pinned versions and the Quay.io MinIO mirror (instead of
 `docker.io/minio/minio`, which stopped publishing free images in
 October 2025) apply everywhere this chart is deployed — not CRC-specific.
+Pulling Postgres/Valkey from `registry.redhat.io` also isn't CRC-specific
+per se (any OpenShift cluster can do it), but it does require a Red Hat
+account's pull secret to be present on the cluster — CRC bundles one
+automatically, but a from-scratch/bare-metal OpenShift install might not
+have one configured yet (`oc get secret pull-secret -n openshift-config`
+to check).
 
 ### Probe timing
 

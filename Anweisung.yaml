@@ -59,10 +59,14 @@
 #   penpot-backend:   docker.io/penpotapp/backend:2.17.2
 #   penpot-frontend:  docker.io/penpotapp/frontend:2.17.2
 #   penpot-exporter:  docker.io/penpotapp/exporter:2.17.2
-#   penpot-postgres:  docker.io/library/postgres:16-alpine   (offizielles Postgres-Image)
-#   penpot-valkey:    docker.io/valkey/valkey:8-alpine
+#   penpot-postgres:  registry.redhat.io/rhel9/postgresql-16:1   (zertifiziertes Red-Hat-Image)
+#   penpot-valkey:    registry.redhat.io/rhel9/valkey-8:8        (zertifiziertes Red-Hat-Image)
 #   penpot-minio:     quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772
 #   Bucket-Erstellung (einmaliger Job): quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
+#
+# Postgres und Valkey liefen ursprünglich auf den einfachen Docker-Hub-Images
+# (postgres:16-alpine, valkey/valkey:8-alpine) — siehe Abschnitt 4 unten für
+# den Wechsel zu den Red-Hat-Images und eine wichtige Lehre daraus.
 #
 # -----------------------------------------------------------------------------
 # 3) GIBT ES DIESE IMAGES AUCH AUF QUAY.IO ODER IN DER OPENSHIFT-REGISTRY?
@@ -89,27 +93,31 @@
 #   Drittanbieter-Anwendung, kein von Red Hat gepflegtes Produkt.
 #
 # --- PostgreSQL ---
-#   Das offizielle Image (was dieses Chart benutzt) ist nur auf Docker Hub:
-#   https://hub.docker.com/_/postgres
-#   Es gibt aber zwei echte Alternativen, falls man unbedingt aus
-#   quay.io/registry.redhat.io ziehen möchte (ACHTUNG: das sind ANDERE
-#   Images, nicht 1:1 austauschbar — andere Umgebungsvariablen, z.B.
-#   POSTGRESQL_ADMIN_PASSWORD statt POSTGRES_PASSWORD):
-#     - quay.io/sclorg/postgresql-16-c9s (Community-Build, öffentlich,
-#       keine Anmeldung nötig)
-#     - registry.redhat.io/rhel9/postgresql-16 (offizielles, zertifiziertes
-#       Red-Hat-Image — braucht eine Red Hat Subscription/Pull-Secret)
+#   Das offizielle (Docker-Hub-)Image ist NICHT auf quay.io, und nicht das,
+#   was jetzt in diesem Chart läuft. Dieses Chart benutzt inzwischen
+#   TATSÄCHLICH das zertifizierte Red-Hat-Image aus der OpenShift-Registry:
+#     - registry.redhat.io/rhel9/postgresql-16:1 (braucht eine Red Hat
+#       Subscription/Pull-Secret — CRC hat das bereits automatisch)
 #       Katalog-Seite: https://catalog.redhat.com/en/software/containers/rhel9/postgresql-16/657b03866783e1b1fb87e142
+#   ACHTUNG, das ist ein ANDERES Image als das ursprüngliche
+#   docker.io/library/postgres:16-alpine — andere Umgebungsvariablen
+#   (POSTGRESQL_USER/PASSWORD/DATABASE statt POSTGRES_USER/PASSWORD/DB) und
+#   ein anderer interner Datenpfad (/var/lib/pgsql/data/userdata statt
+#   /var/lib/postgresql/data/pgdata). Siehe Abschnitt 4 unten — das hat bei
+#   diesem Projekt tatsächlich zu Datenverlust beim Umstieg geführt.
+#   Alternative auf quay.io (Community-Build, ohne Anmeldung, nicht das,
+#   was hier läuft, aber falls man KEINE Red-Hat-Subscription hat):
+#     - quay.io/sclorg/postgresql-16-c9s
 #
 # --- Valkey ---
-#   Das offizielle Image (was dieses Chart benutzt) ist nur auf Docker Hub:
-#   https://hub.docker.com/r/valkey/valkey
-#   NICHT auf quay.io als eigenständiges, benutzbares Image (live geprüft —
-#   es gibt dort nur interne Red-Hat-Build-Artefakte, nichts Brauchbares).
-#   Es gibt aber ein offizielles, zertifiziertes Red-Hat-Image:
-#     - registry.redhat.io/rhel9/valkey-8 (braucht eine Red Hat
-#       Subscription/Pull-Secret)
+#   Genau wie bei PostgreSQL: dieses Chart benutzt inzwischen das
+#   zertifizierte Red-Hat-Image aus der OpenShift-Registry:
+#     - registry.redhat.io/rhel9/valkey-8:8 (braucht eine Red Hat
+#       Subscription/Pull-Secret — CRC hat das bereits automatisch)
 #       Katalog-Seite: https://catalog.redhat.com/en/software/containers/rhel9/valkey-8/685511dd20cfb9db8fefa1cd
+#   Das ursprüngliche offizielle Image (docker.io/valkey/valkey) gibt es
+#   NICHT als eigenständiges, benutzbares Image auf quay.io (live geprüft —
+#   dort liegen nur interne Red-Hat-Build-Artefakte, nichts Brauchbares).
 #
 # --- MinIO ---
 #   HIER ist es umgekehrt: MinIO hat im Oktober 2025 aufgehört, kostenlose
@@ -124,18 +132,47 @@
 # ZUSAMMENFASSUNG
 # -----------------------------------------------------------------------------
 #
-#   Image          | Docker Hub | quay.io | registry.redhat.io
-#   ---------------|------------|---------|--------------------
-#   Penpot (3x)    | ja (nur)   | nein    | nein
-#   PostgreSQL     | ja (nur)   | nein*   | nein* (siehe unten)
-#   Valkey         | ja (nur)   | nein*   | nein* (siehe unten)
-#   MinIO          | nein**     | ja      | nein
+#   Image          | Docker Hub | quay.io | registry.redhat.io      | tatsächlich benutzt
+#   ---------------|------------|---------|--------------------------|--------------------
+#   Penpot (3x)    | ja (nur)   | nein    | nein                     | Docker Hub
+#   PostgreSQL     | ja*        | nein**  | ja (rhel9/postgresql-16) | registry.redhat.io
+#   Valkey         | ja*        | nein**  | ja (rhel9/valkey-8)      | registry.redhat.io
+#   MinIO          | nein***    | ja      | nein                     | quay.io
 #
-#   * Es gibt zertifizierte Red-Hat-Alternativen (rhel9/postgresql-16,
-#     rhel9/valkey-8) — aber das sind andere Images mit anderer
-#     Konfiguration, kein 1:1-Ersatz für die hier benutzten.
-#   ** MinIO stellte kostenlose Docker-Hub-Images bis Oktober 2025 bereit;
-#      seitdem nur noch über quay.io/minio/minio verfügbar.
+#   * Das ursprüngliche, offizielle Image — nicht mehr das, was dieses
+#     Chart benutzt (siehe Abschnitt 4).
+#   ** Es gibt eine Community-Alternative auf quay.io (sclorg/postgresql-16-c9s
+#      für Postgres), aber keine für Valkey.
+#   *** MinIO stellte kostenlose Docker-Hub-Images bis Oktober 2025 bereit;
+#       seitdem nur noch über quay.io/minio/minio verfügbar.
+#
+# -----------------------------------------------------------------------------
+# 4) WARUM POSTGRES/VALKEY JETZT AUS DER OPENSHIFT-REGISTRY KOMMEN — UND WAS
+#    DABEI SCHIEFGING
+# -----------------------------------------------------------------------------
+#
+# Auf ausdrücklichen Wunsch wurden Postgres und Valkey von den einfachen
+# Docker-Hub-Images auf die zertifizierten Red-Hat-Images aus der
+# OpenShift-Registry umgestellt (registry.redhat.io/rhel9/postgresql-16 und
+# .../rhel9/valkey-8). Technisch funktioniert das einwandfrei — beide Images
+# laufen stabil unter der `restricted-v2` SCC von OpenShift, ohne
+# Extra-Rechte.
+#
+# ABER: das neue Postgres-Image benutzt intern einen ANDEREN Datenpfad
+# (/var/lib/pgsql/data/userdata) als das alte Docker-Hub-Image
+# (/var/lib/postgresql/data/pgdata) — obwohl derselbe PVC (derselbe
+# Datenträger) weiterbenutzt wurde. Das neue Image hat an seinem erwarteten
+# Pfad keine Daten gefunden und deshalb automatisch eine FRISCHE, LEERE
+# Datenbank angelegt, statt die alten Daten zu übernehmen. Ein zuvor
+# registrierter Testnutzer-Account ist dabei tatsächlich verloren gegangen
+# (die alten Bytes liegen noch ungenutzt auf demselben PVC, aber ohne
+# manuelle Wiederherstellung nicht zugänglich).
+#
+# DIE LEHRE: beim Wechsel des Datenbank-Images (nicht nur bei Penpot, bei
+# JEDER Anwendung mit Datenbank) IMMER vorher prüfen, ob das neue Image
+# denselben Datenpfad/dieselbe Datenstruktur benutzt wie das alte — sonst
+# lieber vorher ein Backup machen, auch wenn "nur" ein Dev/Test-Cluster
+# betroffen ist.
 #
 # Mehr Details (Architektur, Warum jede Komponente gebraucht wird, wie man
 # prüft ob alles verbunden ist) stehen auf Englisch in README.md und

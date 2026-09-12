@@ -206,6 +206,9 @@ cluster, enterprise included):**
   no `/etc/passwd` entry, so `$HOME` defaults to `/`, which isn't
   writable) — `release-penpot/templates/minio.yaml`.
 - Using an OpenShift `Route` instead of a Kubernetes `Ingress`.
+- Pulling Postgres/Valkey from `registry.redhat.io` — works on any
+  OpenShift cluster with a Red Hat account's pull secret configured (CRC
+  has one by default; a from-scratch cluster might not). See step 8.
 
 **Specific to how ArgoCD happens to be installed on *this* cluster**
 (via the community Argo CD Operator — this is a property of that
@@ -471,6 +474,48 @@ Then open `https://penpot.apps-crc.testing` in a browser and create an
 account — registration and password login are enabled, email
 verification is disabled (see `values.yaml`'s `flags`), so signup works
 without a real mailbox.
+
+## 8. Switching Postgres/Valkey to the OpenShift/Red Hat registry — and a real data-loss incident
+
+Later in this project, Postgres and Valkey were switched from the plain
+upstream Docker Hub images (`postgres:16-alpine`, `valkey/valkey:8-alpine`)
+to Red Hat's certified images from `registry.redhat.io`
+(`rhel9/postgresql-16:1`, `rhel9/valkey-8:8`) — Penpot itself has no
+equivalent there (it's a third-party app), but its two data-store
+dependencies do.
+
+**Valkey**: a clean swap. This image ships its own startup script that
+builds the real `valkey-server` command line internally, so the chart's
+previous custom `args:` (`--maxmemory 128mb`, etc.) had to be dropped —
+overriding `args` would have bypassed that script. No mandatory
+environment variables either; it runs with the same effectively-no-auth
+setup as before.
+
+**Postgres**: technically also a clean swap — different environment
+variables (`POSTGRESQL_USER`/`PASSWORD`/`DATABASE` instead of
+`POSTGRES_USER`/`PASSWORD`/`DB`) and a different mount path
+(`/var/lib/pgsql/data` instead of `/var/lib/postgresql/data`), both
+straightforward changes. **What wasn't obvious going in**: this image
+manages its actual PostgreSQL data cluster in an internal subdirectory
+of that mount (`/var/lib/pgsql/data/userdata`), different from where the
+old image's data actually landed on the *same* PVC
+(`/var/lib/postgresql/data/pgdata`, from this chart's old `PGDATA`
+override). When the new image started against the existing PVC, it found
+nothing at its expected path and silently initialized a **brand-new,
+empty database** — logged plainly as `creating subdirectories ... ok` in
+its startup output, easy to miss if you're not looking for it. A
+previously-registered test account was lost as a result (the old bytes
+are still physically present on the PVC, in the now-unused `pgdata`
+subdirectory, but recovering them would require manually mounting the
+volume with an old-compatible image — not attempted here).
+
+**The lesson, generalized beyond Penpot**: swapping the container image
+behind *any* stateful workload's existing PVC is not guaranteed to be a
+safe, transparent operation, even when the new image is a well-regarded,
+"just as valid" alternative for greenfield use — different images from
+different projects/vendors routinely disagree on internal data layout.
+Take a backup (or at minimum, confirm the new image's expected data path
+matches what's already on disk) *before* the swap, not after.
 
 ## Repo map
 
