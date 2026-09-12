@@ -34,18 +34,26 @@ choices below are genuinely CRC-specific workarounds vs. things that
 would apply anywhere on OpenShift (including a real cluster):
 
 **CRC-specific (would likely not be needed on a properly-sized cluster):**
+- Growing the CRC VM's memory allocation from its ~10.7Gi default to
+  12Gi (`crc config set memory 12288`) — see step 6. Turned out to be
+  the real fix: a completely empty, fresh CRC VM already has ~96% of
+  memory *requested* by OpenShift's own core components alone, before
+  any workload is added. This isn't about Penpot specifically or about
+  other apps cluttering the cluster (that was the original, incomplete
+  theory) — it's this default VM sizing being too small to leave
+  meaningful headroom, period.
 - Clearing `resources` (both `requests` and `limits`) entirely on every
-  Penpot component in `envirenment-penpot/values-dev.yaml`. This exists
-  solely because this specific CRC VM's default memory allocation
-  (~10Gi) was already ~99% committed by *other* things already running
-  on it (ArgoCD, Tekton Pipelines, a sample app) before Penpot entered
-  the picture. On a cluster with real spare memory, delete that
-  override and let `release-penpot/values.yaml`'s normal (BestEffort →
-  Burstable) requests/limits apply instead.
+  Penpot component in `envirenment-penpot/values-dev.yaml`. Still in
+  place even after the memory increase (12Gi has *some* spare room, but
+  not a lot) — see step 3. On a cluster with real spare memory, delete
+  that override and let `release-penpot/values.yaml`'s normal
+  (BestEffort → Burstable) requests/limits apply instead.
 - The recurring `kube-apiserver`/`etcd` restarts and transient "TLS
-  handshake timeout" / "Unauthorized" errors hit repeatedly during this
-  install (see step 3 below). These are a symptom of the same tight
-  memory margin, not something intrinsic to OpenShift itself.
+  handshake timeout" / "Unauthorized" / "connection reset by peer"
+  errors hit repeatedly during the first install attempt (see step 3):
+  a direct symptom of the tight default memory margin, resolved by the
+  memory increase in step 6 — after that, a full reinstall came up
+  clean with zero pod restarts and no API server instability.
 
 **Not CRC-specific — general OpenShift behavior (applies to any
 cluster, enterprise included):**
@@ -254,7 +262,51 @@ OpenShift-specific — it would bite on any cluster if a chart's selector
 labels are derived from `.Release.Name` and the CLI and GitOps paths use
 different release names.
 
-## 6. Verify
+## 6. The real fix: the memory workaround wasn't enough on its own
+
+Even after both ArgoCD bugs above were fixed and `penpot-app` briefly
+reached `Synced`/`Healthy`, the node kept sliding back into distress:
+`kube-apiserver`/`etcd` restarts, multi-minute stretches of `oc`
+returning `TLS handshake timeout` / `connection reset by peer` /
+`Unauthorized`, and the `penpot-backend` and `argocd-server` pods being
+killed by their own liveness probes during those windows — each episode
+longer than the last. The BestEffort workaround in step 3 fixed
+*scheduling*, but it didn't fix the underlying problem: this CRC VM's
+default ~10.7Gi memory allocation left the node with essentially **no**
+real spare memory once its own core components (`kube-apiserver`,
+`etcd`, monitoring, OLM, image registry, ingress, DNS, ...) were
+running — confirmed by checking a completely fresh, empty CRC VM
+(no Penpot, no ArgoCD, nothing) and finding it already had **96% of
+memory requested** by OpenShift itself, before any workload was added.
+
+The actual fix: stop CRC, grow its memory allocation, start it again.
+The host here only has 15Gi total RAM, so there wasn't room for a huge
+jump — 12Gi (up from the ~10.7Gi default) was the realistic ceiling,
+leaving a few Gi for the host OS itself:
+
+```bash
+crc stop
+crc config set memory 12288
+crc start
+```
+
+That took allocatable memory from ~9.99Gi to ~11.5Gi and baseline
+requests from 96% down to 82% — not a huge percentage change, but it was
+the difference between "no headroom, node destabilizes under any load"
+and "small-but-real headroom, everything schedules and stays up." After
+this, a full clean reinstall (fresh `argocd-operator` install, `penpot`
+namespace + secret, `penpot-app` applied) came up straight to
+`Synced`/`Healthy` with all 6 pods `1/1 Running` and zero restarts — no
+crash loops, no API server instability.
+
+**This is the one CRC-specific fix in this whole document that isn't
+really about Penpot at all** — it's about this default CRC VM sizing
+being too small to comfortably run a second nontrivial app (or, as it
+turned out, sometimes even to run *only* itself) on a 15Gi host. If your
+host has more RAM to spare, give CRC more than 12Gi — the more headroom,
+the less likely this recurs.
+
+## 7. Verify
 
 ```bash
 oc get pods -n penpot
